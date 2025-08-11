@@ -1,80 +1,59 @@
-# requirements: Flask, PyJWT, requests, SQLAlchemy, psycopg2-binary
-from flask import Flask, request, jsonify, g
-import jwt
-import requests
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from config import SECRET, DB_URL, SERVICE_MAP
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+import httpx
+import jwt  # PyJWT
+from config import SERVICES_URL, SECRET_JWT
 
-app = Flask(__name__)
+app = FastAPI()
 
-# Único engine (recomendado) e factory de sessions
-engine = create_engine(DB_URL, pool_size=20, max_overflow=40)
-SessionLocal = sessionmaker(bind=engine)
-
-# --- Middleware: decodifica JWT e extrai tenant ---
-@app.before_request
-def extract_tenant_from_jwt():
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        return jsonify({"error": "missing token"}), 401
-    token = auth.split(None, 1)[1]
+def get_profile_from_jwt(token: str) -> str:
     try:
-        payload = jwt.decode(token, SECRET, algorithms=["HS256"])  # ou RS256 com chave pública
-    except jwt.ExpiredSignatureError:
-        return jsonify({"error": "token expired"}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"error": "invalid token"}), 401
+        payload = jwt.decode(token, SECRET_JWT, algorithms=["HS256"])
+        return payload.get("profile")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token inválido")
 
-    # espera que o JWT contenha "profile" com o schema/tenant id
-    tenant = payload.get("profile")
-    if not tenant:
-        return jsonify({"error": "tenant (profile) missing in token"}), 403
 
-    # opcional: validar se tenant existe (cache)
-    # ex.: if not tenant_in_allowlist(tenant): return 404/403
-    g.tenant = tenant
-    g.jwt_payload = payload
+@app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def gateway(service: str, path: str, request: Request):
+    # Verifica se o serviço existe
+    if service not in SERVICE_URLS:
+        raise HTTPException(status_code=404, detail="Serviço não encontrado")
 
-# --- Helper: criar sessão DB e setar search_path ---
-def get_db_session_for_tenant(tenant):
-    session = SessionLocal()
-    # setar search_path para Postgres
-    session.execute(text(f"SET search_path TO {tenant}"))
-    return session
+    # Extrair o token JWT do header
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token não fornecido")
 
-# --- Proxy simples para microservices ---
-@app.route("/api/<service>/<path:subpath>", methods=["GET","POST","PUT","PATCH","DELETE"])
-def proxy(service, subpath):
-    if service not in SERVICE_MAP:
-        return jsonify({"error": "unknown service"}), 404
+    token = auth_header.split(" ")[1]
 
-    target = f"{SERVICE_MAP[service]}/{subpath}"
-    # repassa headers essenciais (incluir tenant para os microservices)
-    headers = {k: v for k, v in request.headers if k.lower() != "host"}
-    headers["X-Tenant-Schema"] = g.tenant
-    # manter o Authorization caso microservices precisem validar
-    resp = requests.request(
-        method=request.method,
-        url=target,
-        headers=headers,
-        params=request.args,
-        data=request.get_data(),
-        timeout=10
-    )
-    return (resp.content, resp.status_code, resp.headers.items())
+    # Extrair profile do JWT
+    profile = get_profile_from_jwt(token)
+    if not profile:
+        raise HTTPException(status_code=401, detail="Profile não encontrado no token")
 
-# --- Endpoint que usa DB (exemplo) ---
-@app.route("/api/internal/report", methods=["GET"])
-def report():
-    tenant = g.tenant
-    session = get_db_session_for_tenant(tenant)
+    # Montar URL do microserviço
+    url = f"{SERVICE_URLS[service]}/{path}"
+
+    # Preparar dados para encaminhar
+    client = httpx.AsyncClient()
+
+    # Copiar método, headers, query params e body da requisição original
+    method = request.method
+    headers = dict(request.headers)
+    # Remover headers que podem causar problemas (host, etc)
+    headers.pop("host", None)
+    # Adicionar header customizado com profile (se quiser)
+    headers["X-Tenant-Profile"] = profile
+
+    query_params = dict(request.query_params)
+    body = await request.body()
+
+    # Fazer requisição para o macroserviço
     try:
-        # exemplo: consulta em schema atual
-        r = session.execute(text("SELECT count(*) FROM users")).scalar()
-        return jsonify({"tenant": tenant, "users_count": int(r)})
+        resp = await client.request(method, url, headers=headers, params=query_params, content=body)
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Erro ao conectar com o serviço: {e}")
     finally:
-        session.close()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+        await client.aclose()
