@@ -9,7 +9,10 @@ app = FastAPI()
 def get_profile_from_jwt(token: str) -> str:
     try:
         payload = jwt.decode(token, SECRET_JWT, algorithms=["HS256"])
-        return payload.get("profile")
+        profile = payload.get("profile")
+        if not profile:
+            raise HTTPException(status_code=401, detail="Profile não encontrato no token")
+        return profile
     except Exception:
         raise HTTPException(status_code=401, detail="Token inválido")
 
