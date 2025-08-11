@@ -1,11 +1,12 @@
 import os
 
-SECRET = "seu-segredo-ou-chave-publica"
+# Mapear prefixo -> url do microserviço
 
-DB_URL = "postgresql://user:pass@db-host:5432/dbname"
-
-SERVICE_MAP = {
-    # rota inicial -> service URL base
-    "users": "http://users-service.internal",
-    "orders": "http://orders-service.internal",
+SERVICE_URLS = {
+    "cmm": "http://localhost:8001/cmm/api",
+    "b2b": "http://localhost:8002/b2b/api",
+    "crm": "http://localhost:8003/crm/api",
+    "scm": "http://localhost:8004/scm/api"
 }
+
+SECRET_JWT = "sua_chave_secreta"  # para validar o JWT, se tiver
